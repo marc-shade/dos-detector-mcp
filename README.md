@@ -1,5 +1,14 @@
 # DoS Detector MCP Server
 
+[![MCP](https://img.shields.io/badge/MCP-Compatible-blue)](https://modelcontextprotocol.io)
+[![Python-3.10+](https://img.shields.io/badge/Python-3.10%2B-green)](https://python.org)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+[![Part of Agentic System](https://img.shields.io/badge/Part_of-Agentic_System-brightgreen)](https://github.com/marc-shade/agentic-system-oss)
+
+> **DoS attack detection and mitigation monitoring.**
+
+Part of the [Agentic System](https://github.com/marc-shade/agentic-system-oss) - a 24/7 autonomous AI framework with persistent memory.
+
 Denial of Service attack detection through log analysis and traffic pattern recognition.
 
 ## Features
@@ -38,3 +47,19 @@ Default thresholds (configurable):
 - Nginx default log format
 - Linux auth.log / secure log
 - Custom formats via regex
+---
+
+## Part of the MCP Ecosystem
+
+This server integrates with other MCP servers for comprehensive AGI capabilities:
+
+| Server | Purpose |
+|--------|---------|
+| [enhanced-memory-mcp](https://github.com/marc-shade/enhanced-memory-mcp) | 4-tier persistent memory with semantic search |
+| [agent-runtime-mcp](https://github.com/marc-shade/agent-runtime-mcp) | Persistent task queues and goal decomposition |
+| [agi-mcp](https://github.com/marc-shade/agi-mcp) | Full AGI orchestration with 21 tools |
+| [cluster-execution-mcp](https://github.com/marc-shade/cluster-execution-mcp) | Distributed task routing across nodes |
+| [node-chat-mcp](https://github.com/marc-shade/node-chat-mcp) | Inter-node AI communication |
+| [ember-mcp](https://github.com/marc-shade/ember-mcp) | Production-only policy enforcement |
+
+See [agentic-system-oss](https://github.com/marc-shade/agentic-system-oss) for the complete framework.
