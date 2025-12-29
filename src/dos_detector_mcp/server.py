@@ -9,14 +9,139 @@ recognition, and anomaly detection.
 import json
 import re
 import statistics
+import time
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Tuple
 
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("dos-detector")
+
+
+# Rate limiting for analysis requests (prevent abuse of the detection tool itself)
+class RateLimiter:
+    """Token bucket rate limiter for analysis requests."""
+
+    def __init__(self, requests_per_minute: int = 30, burst_size: int = 10):
+        self.requests_per_minute = requests_per_minute
+        self.burst_size = burst_size
+        self.tokens = burst_size
+        self.last_update = time.time()
+        self._lock = threading.Lock()
+
+    def _refill(self):
+        """Refill tokens based on elapsed time."""
+        now = time.time()
+        elapsed = now - self.last_update
+        new_tokens = elapsed * (self.requests_per_minute / 60.0)
+        self.tokens = min(self.burst_size, self.tokens + new_tokens)
+        self.last_update = now
+
+    def allow_request(self) -> Tuple[bool, str]:
+        """Check if request should be allowed."""
+        with self._lock:
+            self._refill()
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return True, "allowed"
+            else:
+                wait_time = (1 - self.tokens) * (60.0 / self.requests_per_minute)
+                return False, f"Rate limited. Try again in {wait_time:.1f} seconds"
+
+
+# Global rate limiter instance
+_rate_limiter = RateLimiter(requests_per_minute=30, burst_size=10)
+
+
+def check_rate_limit() -> Tuple[bool, str]:
+    """Check if request is allowed by rate limiter."""
+    return _rate_limiter.allow_request()
+
+
+# Adaptive threshold system
+class AdaptiveThresholds:
+    """Dynamically adjust thresholds based on observed baseline."""
+
+    def __init__(self):
+        self.baseline_rpm: float = 0.0
+        self.baseline_rps: float = 0.0
+        self.baseline_samples: int = 0
+        self.last_analysis: float = 0.0
+        self._lock = threading.Lock()
+
+    def update_baseline(self, avg_rpm: float, avg_rps: float):
+        """Update baseline with new observation using exponential moving average."""
+        with self._lock:
+            if self.baseline_samples == 0:
+                self.baseline_rpm = avg_rpm
+                self.baseline_rps = avg_rps
+            else:
+                # Exponential moving average (alpha = 0.1 for slow adaptation)
+                alpha = 0.1
+                self.baseline_rpm = (1 - alpha) * self.baseline_rpm + alpha * avg_rpm
+                self.baseline_rps = (1 - alpha) * self.baseline_rps + alpha * avg_rps
+
+            self.baseline_samples += 1
+            self.last_analysis = time.time()
+
+    def get_adaptive_thresholds(self) -> Dict[str, float]:
+        """Get thresholds adapted to current baseline."""
+        with self._lock:
+            if self.baseline_samples < 3:
+                # Not enough data, use defaults
+                return dict(THRESHOLDS)
+
+            # Adaptive thresholds: 5x baseline for warning, 10x for critical
+            return {
+                "http_flood_rpm": max(THRESHOLDS["http_flood_rpm"], self.baseline_rpm * 5),
+                "http_flood_rps": max(THRESHOLDS["http_flood_rps"], self.baseline_rps * 5),
+                "syn_flood_halfopen": THRESHOLDS["syn_flood_halfopen"],
+                "slowloris_connections": THRESHOLDS["slowloris_connections"],
+                "bandwidth_spike_percent": THRESHOLDS["bandwidth_spike_percent"],
+                "unique_ips_spike": THRESHOLDS["unique_ips_spike"],
+                "error_rate_threshold": THRESHOLDS["error_rate_threshold"],
+            }
+
+    def get_status(self) -> Dict:
+        """Get current adaptive threshold status."""
+        with self._lock:
+            return {
+                "baseline_rpm": round(self.baseline_rpm, 2),
+                "baseline_rps": round(self.baseline_rps, 2),
+                "samples": self.baseline_samples,
+                "last_analysis": self.last_analysis,
+                "adaptive_thresholds": self.get_adaptive_thresholds()
+            }
+
+
+# Global adaptive threshold instance
+_adaptive_thresholds = AdaptiveThresholds()
+
+
+# Whitelist for known legitimate sources (reduces false positives)
+WHITELIST = {
+    "ips": set(),  # Add known good IPs
+    "user_agents": [
+        r"Googlebot",
+        r"Bingbot",
+        r"YandexBot",
+        r"DuckDuckBot",
+        r"Slackbot",
+    ],
+}
+
+
+def is_whitelisted(ip: str, user_agent: str = "") -> bool:
+    """Check if source is whitelisted (reduces false positives)."""
+    if ip in WHITELIST["ips"]:
+        return True
+    for pattern in WHITELIST["user_agents"]:
+        if re.search(pattern, user_agent, re.IGNORECASE):
+            return True
+    return False
 
 # Detection thresholds (configurable)
 THRESHOLDS = {
@@ -124,6 +249,58 @@ def detect_attack_signatures(entries: list) -> list:
 
 
 @mcp.tool()
+async def get_adaptive_threshold_status() -> str:
+    """
+    Get current adaptive threshold status and baseline metrics.
+
+    Returns:
+        JSON with baseline metrics and current adaptive thresholds
+    """
+    return json.dumps({
+        "success": True,
+        "adaptive_thresholds": _adaptive_thresholds.get_status(),
+        "rate_limiter": {
+            "requests_per_minute": _rate_limiter.requests_per_minute,
+            "burst_size": _rate_limiter.burst_size
+        },
+        "whitelist": {
+            "whitelisted_ips": len(WHITELIST["ips"]),
+            "whitelisted_user_agent_patterns": len(WHITELIST["user_agents"])
+        }
+    }, indent=2)
+
+
+@mcp.tool()
+async def add_to_whitelist(ip: str = "", user_agent_pattern: str = "") -> str:
+    """
+    Add IP or user agent pattern to whitelist to reduce false positives.
+
+    Args:
+        ip: IP address to whitelist
+        user_agent_pattern: Regex pattern for user agents to whitelist
+
+    Returns:
+        JSON with updated whitelist status
+    """
+    added = []
+    if ip:
+        WHITELIST["ips"].add(ip)
+        added.append(f"IP: {ip}")
+    if user_agent_pattern:
+        WHITELIST["user_agents"].append(user_agent_pattern)
+        added.append(f"UA pattern: {user_agent_pattern}")
+
+    return json.dumps({
+        "success": True,
+        "added": added,
+        "whitelist_size": {
+            "ips": len(WHITELIST["ips"]),
+            "user_agent_patterns": len(WHITELIST["user_agents"])
+        }
+    }, indent=2)
+
+
+@mcp.tool()
 async def analyze_access_log(
     log_path: str,
     time_window_minutes: int = 60,
@@ -140,6 +317,11 @@ async def analyze_access_log(
     Returns:
         JSON with attack indicators and statistics
     """
+    # Rate limit check
+    allowed, msg = check_rate_limit()
+    if not allowed:
+        return json.dumps({"success": False, "error": msg})
+
     path = Path(log_path)
     if not path.exists():
         return json.dumps({"success": False, "error": f"Log file not found: {log_path}"})
@@ -185,16 +367,30 @@ async def analyze_access_log(
         else:
             ip_rates[ip] = {"total_requests": len(reqs), "requests_per_minute": len(reqs)}
 
-    # Find potential attackers (exceeding thresholds)
+    # Update baseline for adaptive thresholds
+    all_rpms = [s.get('requests_per_minute', 0) for s in ip_rates.values() if s.get('requests_per_minute', 0) > 0]
+    if all_rpms:
+        avg_rpm = statistics.mean(all_rpms)
+        avg_rps = avg_rpm / 60.0
+        _adaptive_thresholds.update_baseline(avg_rpm, avg_rps)
+
+    # Get adaptive thresholds
+    active_thresholds = _adaptive_thresholds.get_adaptive_thresholds()
+
+    # Find potential attackers (exceeding thresholds, excluding whitelisted)
     potential_attackers = []
     for ip, stats in ip_rates.items():
+        # Skip whitelisted IPs
+        if ip in WHITELIST["ips"]:
+            continue
+
         rpm = stats.get('requests_per_minute', 0)
-        if rpm > THRESHOLDS['http_flood_rpm']:
+        if rpm > active_thresholds['http_flood_rpm']:
             potential_attackers.append({
                 "ip": ip,
                 "rpm": round(rpm, 2),
                 "total": stats['total_requests'],
-                "severity": "high" if rpm > THRESHOLDS['http_flood_rpm'] * 2 else "medium"
+                "severity": "high" if rpm > active_thresholds['http_flood_rpm'] * 2 else "medium"
             })
 
     # Check for attack signatures
