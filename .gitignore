@@ -34,13 +34,23 @@ ENV/
 # Testing
 .pytest_cache/
 .coverage
+.mypy_cache/
 htmlcov/
 
 # Local files
 .env
+.env.*
+!.env.example
 *.db
 *.sqlite
+*.sqlite3
 *.log
+.DS_Store
+
+# Runtime data (cache, logs, data)
+data/
+cache/
+logs/
 
 # Node (if TypeScript)
 node_modules/
